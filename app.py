@@ -1,18 +1,16 @@
-
 import streamlit as st
 import pandas as pd
 import sqlite3
-import json
-import re
 import statistics
+import re
 from datetime import datetime
-from pathlib import Path
+from urllib.parse import quote_plus
 
-# =========================================================
+# =====================================================
 # CONFIGURATION
-# =========================================================
+# =====================================================
 
-APP_NAME = "Vinted Deal Finder V2"
+APP_NAME = "Vinted Deal Finder V3"
 DB_PATH = "vinted_deal_finder.db"
 
 CATEGORIES = [
@@ -30,84 +28,94 @@ POPULAR_PRODUCTS = [
     "Nike Tech Fleece", "Carhartt WIP", "Dickies",
     "Levi's 501", "Ralph Lauren", "Lacoste",
     "The North Face", "Patagonia", "Arc'teryx",
-    "Stone Island", "Tommy Hilfiger", "Sandro",
-    "Maje", "Longchamp", "Michael Kors",
-    "Lego", "Pokémon", "Nintendo Switch",
-    "PlayStation", "Jeux vidéo", "Figurines",
-    "Cartes à collectionner", "Vases", "Décoration vintage",
-    "Lampes", "Objets design", "Montres"
+    "Stone Island", "Tommy Hilfiger", "Sandro", "Maje",
+    "Longchamp", "Michael Kors", "Lego", "Pokémon",
+    "Nintendo Switch", "PlayStation", "Figurines",
+    "Cartes Pokémon", "Vases", "Décoration vintage",
+    "Lampes", "Objets design", "Montres", "Jeux de société",
+    "Appareils photo", "Vinyles", "Consoles rétro"
 ]
 
 DEFECT_WORDS = [
-    "trou", "tache", "tâche", "taché", "déchiré",
-    "dechire", "défaut", "defaut", "usé", "use ",
-    "bouloche", "bouloché", "décoloré", "decolore",
-    "abîmé", "abime", "cassé", "casse", "fissure",
-    "rayure", "manque une pièce", "incomplet",
-    "ne fonctionne pas", "à réparer", "a reparer"
+    "trou", "tache", "taché", "déchiré", "dechire",
+    "défaut", "defaut", "usé", "use ", "bouloche",
+    "décoloré", "decolore", "abîmé", "abime",
+    "cassé", "casse", "fissure", "rayure",
+    "manque une pièce", "incomplet", "à réparer",
+    "a reparer", "ne fonctionne pas", "bloqué"
 ]
 
-SUSPICIOUS_WORDS = [
+FAKE_WORDS = [
     "réplique", "replique", "contrefaçon",
     "contrefacon", "fake", "imitation", "copie"
 ]
 
-ACCEPTED_CONDITIONS = [
+CONDITIONS = [
     "Neuf avec étiquette",
     "Neuf sans étiquette",
-    "Très bon état"
+    "Très bon état",
+    "Bon état",
+    "Satisfaisant",
+    "Non précisé"
 ]
 
 
-# =========================================================
+# =====================================================
 # BASE DE DONNÉES
-# =========================================================
+# =====================================================
 
-def get_db():
+def db():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 
 def init_db():
-    with get_db() as conn:
+    with db() as conn:
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS deals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date_added TEXT,
-                title TEXT,
-                category TEXT,
-                brand TEXT,
-                size TEXT,
-                condition_name TEXT,
-                description TEXT,
-                purchase_price REAL,
-                buyer_fees REAL,
-                inbound_shipping REAL,
-                packaging REAL,
-                resale_estimate REAL,
-                resale_evidence TEXT,
-                confidence TEXT,
-                url TEXT,
-                status TEXT DEFAULT 'À étudier',
-                sale_price REAL DEFAULT 0,
-                sale_fees REAL DEFAULT 0,
-                other_costs REAL DEFAULT 0,
-                notes TEXT
-            )
+        CREATE TABLE IF NOT EXISTS deals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date_added TEXT,
+            title TEXT,
+            category TEXT,
+            brand TEXT,
+            size TEXT,
+            condition_name TEXT,
+            description TEXT,
+            purchase_price REAL,
+            buyer_fees REAL,
+            inbound_shipping REAL,
+            packaging REAL,
+            resale_estimate REAL,
+            resale_evidence TEXT,
+            confidence TEXT,
+            url TEXT,
+            status TEXT DEFAULT 'À étudier',
+            sale_price REAL DEFAULT 0,
+            sale_fees REAL DEFAULT 0,
+            other_costs REAL DEFAULT 0,
+            notes TEXT
+        )
         """)
         conn.commit()
 
 
+def load_deals():
+    with db() as conn:
+        return pd.read_sql_query(
+            "SELECT * FROM deals ORDER BY id DESC", conn
+        )
+
+
 def save_deal(data):
-    with get_db() as conn:
+    with db() as conn:
         conn.execute("""
-            INSERT INTO deals (
-                date_added, title, category, brand, size,
-                condition_name, description, purchase_price,
-                buyer_fees, inbound_shipping, packaging,
-                resale_estimate, resale_evidence, confidence,
-                url, status, notes
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO deals (
+            date_added, title, category, brand, size,
+            condition_name, description, purchase_price,
+            buyer_fees, inbound_shipping, packaging,
+            resale_estimate, resale_evidence, confidence,
+            url, status, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             datetime.now().strftime("%Y-%m-%d %H:%M"),
             data["title"], data["category"], data["brand"],
@@ -121,42 +129,32 @@ def save_deal(data):
         conn.commit()
 
 
-def load_deals():
-    with get_db() as conn:
-        return pd.read_sql_query(
-            "SELECT * FROM deals ORDER BY id DESC", conn
-        )
-
-
-def update_sale(deal_id, sale_price, sale_fees, other_costs):
-    with get_db() as conn:
+def update_sale(deal_id, sale_price, fees, other):
+    with db() as conn:
         conn.execute("""
-            UPDATE deals
-            SET status = 'Vendu',
-                sale_price = ?,
-                sale_fees = ?,
-                other_costs = ?
-            WHERE id = ?
-        """, (sale_price, sale_fees, other_costs, deal_id))
+        UPDATE deals
+        SET status='Vendu', sale_price=?,
+            sale_fees=?, other_costs=?
+        WHERE id=?
+        """, (sale_price, fees, other, deal_id))
         conn.commit()
 
 
 def delete_deal(deal_id):
-    with get_db() as conn:
-        conn.execute("DELETE FROM deals WHERE id = ?", (deal_id,))
+    with db() as conn:
+        conn.execute("DELETE FROM deals WHERE id=?", (deal_id,))
         conn.commit()
 
 
-# =========================================================
-# ANALYSE DES ANNONCES
-# =========================================================
+# =====================================================
+# ANALYSE
+# =====================================================
 
-def inspect_description(description, condition):
+def inspect_listing(description, condition):
     text = (description or "").lower()
-    defects = [word for word in DEFECT_WORDS if word in text]
-    suspicious = [
-        word for word in SUSPICIOUS_WORDS if word in text
-    ]
+
+    defects = [w for w in DEFECT_WORDS if w in text]
+    suspicious = [w for w in FAKE_WORDS if w in text]
 
     if suspicious:
         return "À REJETER", defects, suspicious
@@ -164,20 +162,30 @@ def inspect_description(description, condition):
     if defects:
         return "À VÉRIFIER", defects, suspicious
 
-    if condition not in ACCEPTED_CONDITIONS:
-        return "À VÉRIFIER", defects, suspicious
+    if condition in ["Neuf avec étiquette", "Neuf sans étiquette",
+                     "Très bon état"]:
+        return "ÉTAT FAVORABLE À CONFIRMER", defects, suspicious
 
-    return "ÉTAT À CONFIRMER", defects, suspicious
+    return "À VÉRIFIER", defects, suspicious
 
 
-def estimate_resale(comparable_prices, discount):
-    prices = [
-        float(p) for p in comparable_prices
-        if p is not None and float(p) > 0
-    ]
+def parse_prices(raw):
+    values = []
+    for item in raw.split(","):
+        item = item.strip().replace("€", "").replace(",", ".")
+        if item:
+            try:
+                value = float(item)
+                if value > 0:
+                    values.append(value)
+            except ValueError:
+                pass
+    return values
 
+
+def estimate_resale(prices, discount):
     if not prices:
-        return None, "Aucune donnée", 0
+        return None, "Aucune donnée"
 
     median = statistics.median(prices)
     estimate = median * discount
@@ -189,67 +197,43 @@ def estimate_resale(comparable_prices, discount):
     else:
         confidence = "Faible"
 
-    return round(estimate, 2), confidence, len(prices)
+    return round(estimate, 2), confidence
 
 
-def calculate_profit(
-    resale, purchase, buyer_fees, shipping, packaging,
-    sale_fees=0, other_costs=0
-):
+def calculate(purchase, buyer_fees, shipping, packaging,
+              resale, sale_fees=0, other_costs=0):
+
     total_cost = (
         purchase + buyer_fees + shipping +
         packaging + sale_fees + other_costs
     )
+
     profit = resale - total_cost
-    margin = (profit / total_cost * 100) if total_cost > 0 else 0
+    margin = profit / total_cost * 100 if total_cost else 0
+
     return round(profit, 2), round(margin, 1), round(total_cost, 2)
 
 
-def opportunity_score(profit, margin, confidence, condition):
-    score = 0
+def max_purchase_price(resale, buyer_fees, shipping,
+                       packaging, target_profit):
 
-    if profit > 30:
-        score += 35
-    elif profit > 15:
-        score += 25
-    elif profit > 5:
-        score += 15
-    elif profit > 0:
-        score += 5
-
-    if margin >= 100:
-        score += 25
-    elif margin >= 50:
-        score += 20
-    elif margin >= 25:
-        score += 10
-
-    if confidence == "Élevée":
-        score += 20
-    elif confidence == "Moyenne":
-        score += 12
-    elif confidence == "Faible":
-        score += 5
-
-    if condition == "ÉTAT À CONFIRMER":
-        score += 10
-
-    return min(score, 100)
+    return max(
+        0,
+        resale - buyer_fees - shipping - packaging - target_profit
+    )
 
 
-def opportunity_label(score):
-    if score >= 75:
-        return "Excellente opportunité"
-    if score >= 55:
-        return "Opportunité intéressante"
-    if score >= 35:
-        return "À étudier"
-    return "Potentiel faible"
+def make_vinted_url(search):
+    return (
+        "https://www.vinted.fr/catalog?search_text="
+        + quote_plus(search)
+        + "&order=newest_first"
+    )
 
 
-# =========================================================
+# =====================================================
 # INTERFACE
-# =========================================================
+# =====================================================
 
 st.set_page_config(
     page_title=APP_NAME,
@@ -259,10 +243,12 @@ st.set_page_config(
 
 init_db()
 
-st.title("🔎 Vinted Deal Finder V2")
+st.title("🔎 Vinted Deal Finder V3")
 st.caption(
-    "Détection, analyse et suivi des opportunités d'achat-revente."
+    "Exploration, analyse et suivi des opportunités d'achat-revente."
 )
+
+# PARAMÈTRES
 
 with st.sidebar:
     st.header("⚙️ Paramètres")
@@ -270,7 +256,6 @@ with st.sidebar:
     budget_max = st.number_input(
         "Budget maximum par article (€)",
         min_value=1.0,
-        max_value=10000.0,
         value=100.0,
         step=5.0
     )
@@ -291,20 +276,14 @@ with st.sidebar:
 
     discount = st.slider(
         "Coefficient prudent de revente",
-        min_value=0.50,
-        max_value=1.00,
-        value=0.85,
-        step=0.05
+        0.50, 1.00, 0.85, 0.05
     )
 
     st.caption(
         "Le coefficient réduit les prix comparables saisis. "
-        "Il ne transforme pas des prix affichés en prix de ventes réelles."
+        "Il ne prouve pas qu'un article a réellement été vendu à ce prix."
     )
 
-# =========================================================
-# ONGLETS
-# =========================================================
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔍 Recherche",
@@ -315,106 +294,92 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 
-# =========================================================
-# ONGLET 1 : RECHERCHE
-# =========================================================
+# =====================================================
+# 1. RECHERCHE ET EXPLORATION
+# =====================================================
 
 with tab1:
-    st.header("Exploration des catégories")
 
-    st.info(
-        "Cette interface prépare tes recherches. "
-        "La récupération automatique des annonces nécessite "
-        "une source de données autorisée."
+    st.header("Explorer toutes les catégories")
+
+    st.write(
+        "Choisis une catégorie ou un produit populaire "
+        "pour ouvrir directement une recherche Vinted."
     )
 
-    selected_categories = st.multiselect(
-        "Catégories à explorer",
-        CATEGORIES,
-        default=CATEGORIES
+    category = st.selectbox(
+        "Catégorie à explorer",
+        CATEGORIES
     )
 
-    st.subheader("Produits populaires")
-
-    selected_products = st.multiselect(
-        "Produits à surveiller",
-        POPULAR_PRODUCTS,
-        default=POPULAR_PRODUCTS[:12]
+    custom_category_search = st.text_input(
+        "Préciser un type d'article",
+        placeholder="Exemple : sac à main vintage"
     )
 
-    custom_search = st.text_input(
-        "Ajouter un produit ou une marque"
+    search_category = custom_category_search.strip() or category
+
+    st.link_button(
+        "🔎 Rechercher cette catégorie sur Vinted",
+        make_vinted_url(search_category)
     )
-
-    if st.button("Préparer mes recherches", type="primary"):
-        searches = selected_products.copy()
-
-        if custom_search.strip():
-            searches.append(custom_search.strip())
-
-        st.session_state["search_plan"] = {
-            "categories": selected_categories,
-            "products": searches
-        }
-
-        st.success(
-            f"{len(selected_categories)} catégories et "
-            f"{len(searches)} recherches préparées."
-        )
-
-    if "search_plan" in st.session_state:
-        st.subheader("Plan de recherche")
-        st.write(
-            "Catégories :",
-            ", ".join(st.session_state["search_plan"]["categories"])
-        )
-        st.write(
-            "Produits :",
-            ", ".join(st.session_state["search_plan"]["products"])
-        )
 
     st.divider()
 
-    st.subheader("Importer des annonces depuis un CSV")
+    st.header("🔥 Produits populaires à surveiller")
 
-    uploaded_csv = st.file_uploader(
-        "Importer un fichier CSV d'annonces",
-        type=["csv"]
+    selected_products = st.multiselect(
+        "Sélectionner les produits",
+        POPULAR_PRODUCTS,
+        default=POPULAR_PRODUCTS[:10]
     )
 
-    if uploaded_csv:
-        try:
-            imported = pd.read_csv(uploaded_csv, sep=None, engine="python")
-            st.write("Aperçu des données importées")
-            st.dataframe(imported.head(20), use_container_width=True)
+    custom_product = st.text_input(
+        "Ajouter une marque ou un produit"
+    )
 
-            st.caption(
-                "L'import sert à examiner les données. "
-                "Les annonces ne sont pas enregistrées automatiquement."
+    if st.button("Générer mes recherches populaires"):
+        searches = selected_products.copy()
+
+        if custom_product.strip():
+            searches.append(custom_product.strip())
+
+        st.session_state["searches"] = searches
+
+    if "searches" in st.session_state:
+        st.subheader("Tes recherches")
+
+        for product in st.session_state["searches"]:
+            st.markdown(
+                f"- **{product}** — "
+                f"[Voir les annonces récentes sur Vinted]"
+                f"({make_vinted_url(product)})"
             )
 
-            st.download_button(
-                "Télécharger le modèle CSV",
-                pd.DataFrame(columns=[
-                    "title", "category", "brand", "size",
-                    "condition", "description", "purchase",
-                    "url"
-                ]).to_csv(index=False).encode("utf-8"),
-                "modele_annonces.csv",
-                "text/csv"
-            )
-        except Exception as e:
-            st.error(f"Erreur de lecture du CSV : {e}")
+    st.divider()
+
+    st.info(
+        "Les liens ouvrent les recherches Vinted, triées par nouveautés. "
+        "Cette version ne récupère pas automatiquement les annonces "
+        "du site. Il faut une source de données autorisée pour cela."
+    )
 
 
-# =========================================================
-# ONGLET 2 : AJOUTER UNE ANNONCE
-# =========================================================
+# =====================================================
+# 2. AJOUTER UNE ANNONCE
+# =====================================================
 
 with tab2:
-    st.header("Ajouter une annonce à analyser")
 
-    with st.form("add_deal_form"):
+    st.header("Analyser une annonce")
+
+    st.caption(
+        "Copie les informations de l'annonce Vinted. "
+        "Tu peux aussi ajouter une photo pour la consulter ici."
+    )
+
+    with st.form("listing_form"):
+
         title = st.text_input("Titre de l'article")
         category = st.selectbox("Catégorie", CATEGORIES)
         brand = st.text_input("Marque")
@@ -422,19 +387,23 @@ with tab2:
 
         condition = st.selectbox(
             "État annoncé",
-            ACCEPTED_CONDITIONS + [
-                "Bon état", "Satisfaisant", "Non précisé"
-            ]
+            CONDITIONS
         )
 
         description = st.text_area(
             "Description de l'annonce",
-            height=130
+            height=120
         )
 
-        url = st.text_input("Lien de l'annonce Vinted")
+        url = st.text_input("Lien Vinted")
 
-        st.subheader("Coût d'achat")
+        photos = st.file_uploader(
+            "Photos de l'annonce (facultatif)",
+            type=["jpg", "jpeg", "png", "webp"],
+            accept_multiple_files=True
+        )
+
+        st.subheader("Prix d'achat")
 
         c1, c2 = st.columns(2)
 
@@ -455,7 +424,7 @@ with tab2:
         c3, c4 = st.columns(2)
 
         shipping = c3.number_input(
-            "Livraison à l'achat (€)",
+            "Livraison (€)",
             min_value=0.0,
             value=0.0,
             step=0.5
@@ -468,25 +437,19 @@ with tab2:
             step=0.5
         )
 
-        st.subheader("Comparables de revente")
-
-        st.caption(
-            "Entre des prix de comparaison pertinents, idéalement "
-            "issus de ventes terminées vérifiables. "
-            "Indique leur nature dans le champ de preuve."
-        )
+        st.subheader("Comparaison des prix")
 
         comparable_text = st.text_input(
             "Prix comparables séparés par des virgules",
-            placeholder="35, 39, 42, 40"
+            placeholder="30, 35, 39, 42"
         )
 
         evidence = st.selectbox(
-            "Nature des comparables",
+            "Origine des prix comparables",
             [
                 "Prix affichés d'annonces actives",
-                "Prix d'annonces marquées vendues",
-                "Prix de ventes réellement observés",
+                "Annonces marquées vendues",
+                "Ventes réellement observées",
                 "Estimation personnelle",
                 "Aucune preuve"
             ]
@@ -499,192 +462,221 @@ with tab2:
             type="primary"
         )
 
+    if photos:
+        st.subheader("Photos importées")
+        cols = st.columns(3)
+
+        for i, photo in enumerate(photos):
+            with cols[i % 3]:
+                st.image(photo, use_container_width=True)
+
+        st.warning(
+            "Les photos sont affichées pour inspection manuelle. "
+            "Cette version ne réalise pas encore d'analyse visuelle automatique."
+        )
+
     if submitted:
+
         if not title.strip():
             st.error("Indique le titre de l'article.")
+
         elif purchase <= 0:
             st.error("Indique un prix d'achat valide.")
+
         elif purchase > budget_max:
             st.error(
                 f"Le prix dépasse ton budget actuel de {budget_max:.2f} €."
             )
+
         else:
-            result, defects, suspicious = inspect_description(
+            result, defects, suspicious = inspect_listing(
                 description, condition
             )
 
-            try:
-                comps = [
-                    float(x.strip().replace(",", "."))
-                    for x in comparable_text.split(",")
-                    if x.strip()
-                ]
-            except ValueError:
-                comps = []
-                st.error("Vérifie les prix comparables.")
-                st.stop()
+            prices = parse_prices(comparable_text)
 
-            resale, confidence, comp_count = estimate_resale(
-                comps, discount
+            resale, confidence = estimate_resale(
+                prices, discount
             )
-
-            profit = None
-            margin = None
-
-            if resale is not None:
-                profit, margin, total_cost = calculate_profit(
-                    resale, purchase, buyer_fees,
-                    shipping, packaging
-                )
 
             st.subheader("Résultat de l'analyse")
 
             if suspicious:
                 st.error(
-                    "Mots associés à une possible contrefaçon : "
+                    "Risque de contrefaçon : "
                     + ", ".join(suspicious)
                 )
+
             elif defects:
                 st.warning(
-                    "Défauts mentionnés : " + ", ".join(defects)
+                    "Défauts mentionnés dans la description : "
+                    + ", ".join(defects)
                 )
+
             else:
                 st.info(
-                    "Aucun défaut détecté dans le texte. "
+                    "Aucun défaut repéré dans le texte. "
                     "Cela ne garantit pas l'état réel de l'article."
                 )
 
             if resale is None:
                 st.warning(
-                    "Impossible d'estimer la revente : "
-                    "aucun comparable fourni."
+                    "Ajoute des prix comparables pour calculer "
+                    "une estimation de revente."
                 )
-                score = 0
+                resale_to_save = 0.0
+                confidence = "Aucune donnée"
+
             else:
-                score = opportunity_score(
-                    profit, margin, confidence, result
+                profit, margin, total_cost = calculate(
+                    purchase, buyer_fees, shipping,
+                    packaging, resale
+                )
+
+                max_price = max_purchase_price(
+                    resale, buyer_fees, shipping,
+                    packaging, min_profit
                 )
 
                 st.metric("Revente estimée", f"{resale:.2f} €")
-                st.metric("Bénéfice net estimé", f"{profit:.2f} €")
+                st.metric("Bénéfice estimé", f"{profit:.2f} €")
                 st.metric("Marge estimée", f"{margin:.1f} %")
-                st.write(f"Comparables utilisés : {comp_count}")
-                st.write(f"Confiance statistique : {confidence}")
-                st.write(f"Score indicatif : {score}/100")
-                st.write(opportunity_label(score))
+
+                st.metric(
+                    "Prix d'achat maximal conseillé",
+                    f"{max_price:.2f} €"
+                )
+
+                st.write(f"Comparables utilisés : {len(prices)}")
+                st.write(f"Confiance : {confidence}")
+                st.write(f"Résultat de l'état : {result}")
 
                 if evidence == "Prix affichés d'annonces actives":
                     st.warning(
-                        "Attention : les prix affichés ne prouvent "
-                        "pas que les articles se vendent à ces montants."
+                        "Les prix affichés ne sont pas des prix de vente réels."
                     )
 
-            if result == "À REJETER":
-                st.error("Annonce à rejeter selon les mots détectés.")
+                if result == "À REJETER":
+                    st.error(
+                        "Attention : annonce à écarter en raison "
+                        "des termes suspects."
+                    )
 
-            if st.button("Confirmer l'enregistrement"):
-                save_deal({
-                    "title": title,
-                    "category": category,
-                    "brand": brand,
-                    "size": size,
-                    "condition": condition,
-                    "description": description,
-                    "purchase": purchase,
-                    "buyer_fees": buyer_fees,
-                    "shipping": shipping,
-                    "packaging": packaging,
-                    "resale": resale or 0,
-                    "evidence": evidence,
-                    "confidence": confidence,
-                    "url": url,
-                    "status": "À étudier",
-                    "notes": notes
-                })
-                st.success("Article enregistré dans ton historique.")
+                resale_to_save = resale
+
+            save_deal({
+                "title": title,
+                "category": category,
+                "brand": brand,
+                "size": size,
+                "condition": condition,
+                "description": description,
+                "purchase": purchase,
+                "buyer_fees": buyer_fees,
+                "shipping": shipping,
+                "packaging": packaging,
+                "resale": resale_to_save,
+                "evidence": evidence,
+                "confidence": confidence,
+                "url": url,
+                "status": "À étudier",
+                "notes": notes
+            })
+
+            st.success("Annonce enregistrée dans ton historique.")
 
 
-# =========================================================
-# ONGLET 3 : OPPORTUNITÉS
-# =========================================================
+# =====================================================
+# 3. OPPORTUNITÉS
+# =====================================================
 
 with tab3:
-    st.header("Mes opportunités")
+
+    st.header("Mes meilleures opportunités")
 
     deals = load_deals()
 
     if deals.empty:
-        st.info("Aucune annonce enregistrée pour le moment.")
+        st.info("Ajoute tes premières annonces pour les retrouver ici.")
+
     else:
         opportunities = deals.copy()
 
-        opportunities["benefice_estime"] = (
-            opportunities["resale_estimate"]
-            - opportunities["purchase_price"]
-            - opportunities["buyer_fees"]
-            - opportunities["inbound_shipping"]
-            - opportunities["packaging"]
+        opportunities["cout_total"] = (
+            opportunities["purchase_price"]
+            + opportunities["buyer_fees"]
+            + opportunities["inbound_shipping"]
+            + opportunities["packaging"]
         )
 
-        opportunities = opportunities[
-            opportunities["status"] != "Vendu"
-        ]
-
-        opportunities = opportunities[
-            opportunities["purchase_price"] <= budget_max
-        ]
-
-        opportunities = opportunities[
-            opportunities["benefice_estime"] >= min_profit
-        ]
+        opportunities["benefice_estime"] = (
+            opportunities["resale_estimate"]
+            - opportunities["cout_total"]
+        )
 
         opportunities["marge_estimee"] = (
             opportunities["benefice_estime"] /
-            (
-                opportunities["purchase_price"]
-                + opportunities["buyer_fees"]
-                + opportunities["inbound_shipping"]
-                + opportunities["packaging"]
-            ).replace(0, pd.NA)
+            opportunities["cout_total"].replace(0, pd.NA)
         ) * 100
 
         opportunities = opportunities[
-            opportunities["marge_estimee"] >= min_margin
+            (opportunities["status"] != "Vendu")
+            & (opportunities["purchase_price"] <= budget_max)
+            & (opportunities["benefice_estime"] >= min_profit)
+            & (opportunities["marge_estimee"] >= min_margin)
+            & (opportunities["resale_estimate"] > 0)
         ]
 
-        st.write(f"{len(opportunities)} opportunités correspondent à tes critères.")
+        opportunities = opportunities.sort_values(
+            "benefice_estime", ascending=False
+        )
+
+        st.metric(
+            "Opportunités correspondant à tes critères",
+            len(opportunities)
+        )
 
         if not opportunities.empty:
+
             st.dataframe(
                 opportunities[[
-                    "title", "category", "purchase_price",
-                    "resale_estimate", "benefice_estime",
-                    "marge_estimee", "confidence", "url"
+                    "title", "category", "brand",
+                    "purchase_price", "resale_estimate",
+                    "benefice_estime", "marge_estimee",
+                    "confidence", "url"
                 ]],
                 use_container_width=True,
                 hide_index=True,
                 column_config={
                     "url": st.column_config.LinkColumn(
-                        "Annonce", display_text="Ouvrir"
+                        "Annonce",
+                        display_text="Ouvrir"
                     )
                 }
             )
+
         else:
-            st.info("Aucune opportunité ne correspond à tes critères.")
+            st.info(
+                "Aucune opportunité ne correspond actuellement "
+                "à tes paramètres."
+            )
 
 
-# =========================================================
-# ONGLET 4 : HISTORIQUE
-# =========================================================
+# =====================================================
+# 4. HISTORIQUE
+# =====================================================
 
 with tab4:
-    st.header("Historique de tes articles")
+
+    st.header("Historique des articles")
 
     history = load_deals()
 
     if history.empty:
-        st.info("Ton historique est encore vide.")
+        st.info("Ton historique est vide.")
+
     else:
+
         st.dataframe(
             history[[
                 "id", "date_added", "title", "category",
@@ -704,6 +696,7 @@ with tab4:
         ]
 
         if not available.empty:
+
             choices = {
                 f'{row["id"]} - {row["title"]}': int(row["id"])
                 for _, row in available.iterrows()
@@ -736,8 +729,10 @@ with tab4:
             )
 
             if st.button("Enregistrer la vente"):
+
                 if sale_price <= 0:
                     st.error("Indique un prix de vente valide.")
+
                 else:
                     update_sale(
                         choices[selected],
@@ -745,27 +740,26 @@ with tab4:
                         sale_fees,
                         other_costs
                     )
+
                     st.success("Vente enregistrée.")
                     st.rerun()
 
         st.divider()
 
-        st.subheader("Supprimer un article")
-
         delete_id = st.number_input(
-            "Identifiant de l'article à supprimer",
+            "Identifiant à supprimer",
             min_value=0,
             step=1
         )
 
-        if st.button("Supprimer définitivement"):
+        if st.button("Supprimer cet article"):
             if delete_id > 0:
                 delete_deal(int(delete_id))
                 st.success("Article supprimé.")
                 st.rerun()
 
         st.download_button(
-            "Exporter tout mon historique",
+            "Exporter mon historique CSV",
             history.to_csv(
                 index=False, sep=";"
             ).encode("utf-8-sig"),
@@ -774,55 +768,59 @@ with tab4:
         )
 
 
-# =========================================================
-# ONGLET 5 : STATISTIQUES
-# =========================================================
+# =====================================================
+# 5. STATISTIQUES
+# =====================================================
 
 with tab5:
-    st.header("Statistiques de ton activité")
+
+    st.header("Statistiques")
 
     history = load_deals()
 
     if history.empty:
-        st.info("Les statistiques apparaîtront après tes premiers achats.")
+        st.info("Les statistiques apparaîtront avec tes premiers articles.")
+
     else:
-        sold = history[history["status"] == "Vendu"].copy()
+
+        sold = history[
+            history["status"] == "Vendu"
+        ].copy()
 
         total_articles = len(history)
         total_sold = len(sold)
 
-        total_invested = (
+        invested = (
             sold["purchase_price"]
             + sold["buyer_fees"]
             + sold["inbound_shipping"]
             + sold["packaging"]
         ).sum()
 
-        total_revenue = sold["sale_price"].sum()
+        revenue = sold["sale_price"].sum()
 
-        total_fees = (
+        fees = (
             sold["sale_fees"] + sold["other_costs"]
         ).sum()
 
-        real_profit = total_revenue - total_invested - total_fees
+        profit = revenue - invested - fees
 
         c1, c2, c3 = st.columns(3)
 
-        c1.metric("Articles enregistrés", total_articles)
+        c1.metric("Articles suivis", total_articles)
         c2.metric("Articles vendus", total_sold)
-        c3.metric("Bénéfice réalisé", f"{real_profit:.2f} €")
-
-        st.divider()
+        c3.metric("Bénéfice réalisé", f"{profit:.2f} €")
 
         if total_sold:
+
             st.metric(
-                "Prix moyen de revente",
+                "Prix moyen de vente",
                 f"{sold['sale_price'].mean():.2f} €"
             )
 
             st.metric(
                 "Bénéfice moyen par vente",
-                f"{real_profit / total_sold:.2f} €"
+                f"{profit / total_sold:.2f} €"
             )
 
             category_stats = sold.groupby("category").agg(
@@ -831,6 +829,7 @@ with tab5:
             ).reset_index()
 
             st.subheader("Catégories les plus vendues")
+
             st.dataframe(
                 category_stats.sort_values(
                     "ventes", ascending=False
@@ -838,6 +837,7 @@ with tab5:
                 use_container_width=True,
                 hide_index=True
             )
+
         else:
             st.info(
                 "Enregistre tes premières ventes pour obtenir "
@@ -845,16 +845,15 @@ with tab5:
             )
 
 
-# =========================================================
+# =====================================================
 # PIED DE PAGE
-# =========================================================
+# =====================================================
 
 st.divider()
 
 st.caption(
-    "Vinted Deal Finder V2 — Outil personnel d'analyse. "
+    "Vinted Deal Finder V3 — Outil personnel d'analyse. "
     "Les estimations ne garantissent ni la vente ni le bénéfice. "
     "Vérifie les annonces, les photos, l'authenticité et les frais "
     "avant chaque achat."
 )
-
